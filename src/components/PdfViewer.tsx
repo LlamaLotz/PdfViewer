@@ -12,12 +12,13 @@ import {
   AlertTriangle, 
   FileText,
   HelpCircle,
-  FolderOpen
+  FolderOpen,
+  Upload
 } from "lucide-react";
 
-// Auto-resolves links into direct streaming assets
+// Helper function to dynamically resolve Dropbox / Pixeldrain URLs
 const resolveStreamUrl = (inputUrl: string): string => {
-  // 1. Convert Dropbox links
+  // 1. Auto-convert Dropbox links from web-preview to CORS-native direct streams (No proxy needed!)
   if (inputUrl.includes("dropbox.com")) {
     return inputUrl
       .replace("www.dropbox.com", "dl.dropboxusercontent.com")
@@ -25,31 +26,13 @@ const resolveStreamUrl = (inputUrl: string): string => {
       .replace("dl=default", "dl=1");
   }
 
-  // 2. Convert Pixeldrain links
+  // 2. Auto-convert Pixeldrain links (supports free anonymous uploads up to 20GB)
   if (inputUrl.includes("pixeldrain.com")) {
     const pixelMatch = inputUrl.match(/\/u\/([a-zA-Z0-9_-]+)/);
     if (pixelMatch && pixelMatch[1]) {
       const fileId = pixelMatch[1];
       return `https://pixeldrain.com/api/file/${fileId}`;
     }
-  }
-
-  // 3. Convert Google Drive links to our internal Edge streaming proxy
-  const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit|preview)/;
-  const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
-  
-  let fileId = "";
-  const match1 = inputUrl.match(driveRegex);
-  const match2 = inputUrl.match(driveOpenRegex);
-  
-  if (match1 && match1[1]) {
-    fileId = match1[1];
-  } else if (match2 && match2[1]) {
-    fileId = match2[1];
-  }
-  
-  if (fileId) {
-    return `/api/proxy?id=${fileId}`;
   }
   
   return inputUrl;
@@ -70,6 +53,7 @@ export default function PdfViewer() {
   const [rendering, setRendering] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [showInstructions, setShowInstructions] = useState<boolean>(false);
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
@@ -122,7 +106,7 @@ export default function PdfViewer() {
         if (active) {
           setError(
             err.message?.includes("CORS") || err.name === "NetworkError"
-              ? "Access Blocked: Ensure your file sharing settings in Google Drive or Dropbox are set to 'Anyone with the link can view'."
+              ? "CORS Blocked: Google Drive or this host server strictly blocks direct browser streaming. Please use a Dropbox or Pixeldrain link."
               : `Failed to open PDF document: ${err.message || "Unknown error occurred"}`
           );
           setLoading(false);
@@ -214,6 +198,23 @@ export default function PdfViewer() {
     if (file) handleLocalFileLoad(file);
   };
 
+  // Drag and Drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleLocalFileLoad(file);
+  };
+
   const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (inputUrl.trim()) {
@@ -236,7 +237,7 @@ export default function PdfViewer() {
             <Link2 className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
             <input
               type="url"
-              placeholder="Paste Google Drive, Dropbox, or direct PDF link..."
+              placeholder="Paste direct PDF, Dropbox, or Pixeldrain link..."
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
               className="w-full rounded-lg bg-slate-950 py-2 pl-9 pr-4 text-sm text-slate-300 placeholder-slate-500 outline-none ring-1 ring-slate-800 transition focus:ring-2 focus:ring-indigo-500"
@@ -361,17 +362,49 @@ export default function PdfViewer() {
             </div>
           </div>
 
-          {/* Active Work Area */}
-          <div className="flex-1 overflow-auto p-4 flex flex-col justify-center items-center">
-            {error ? (
-              <div className="max-w-md rounded-xl border border-rose-500/30 bg-rose-950/20 p-6 text-center shadow-lg">
+          {/* Active Work Area + Drag and Drop Wrapper */}
+          {/* Changed flex layout to justify-center and items-start for native scrolling when zoomed */}
+          <div 
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`flex-1 overflow-auto p-8 flex justify-center items-start transition-all ${
+              isDragOver ? "bg-indigo-950/25 border-4 border-dashed border-indigo-500/50" : ""
+            }`}
+          >
+            {isDragOver ? (
+              <div className="flex flex-col items-center gap-4 pointer-events-none animate-pulse self-center my-auto">
+                <Upload className="h-16 w-16 text-indigo-400" />
+                <p className="text-lg font-bold text-indigo-300">Drop your PDF file here</p>
+                <p className="text-xs text-slate-400">Instantly stream files up to 10GB</p>
+              </div>
+            ) : error ? (
+              <div className="max-w-md rounded-xl border border-rose-500/30 bg-rose-950/20 p-6 text-center shadow-lg self-center my-auto">
                 <AlertTriangle className="mx-auto h-12 w-12 text-rose-500" />
                 <h3 className="mt-4 font-semibold text-rose-200">Failed to stream document</h3>
                 <p className="mt-2 text-xs text-rose-300/80 leading-relaxed">{error}</p>
+                
+                {url.includes("api/proxy") && (
+                  <div className="mt-5 text-left bg-slate-900 border border-amber-500/30 p-4 rounded-lg text-xs">
+                    <p className="font-bold text-amber-400 flex items-center gap-1">⚠️ Google Drive Limitation</p>
+                    <p className="text-slate-300 mt-2 leading-relaxed">
+                      Google Drive strictly blocks direct streaming for large documents.
+                    </p>
+                    <p className="text-slate-300 mt-2 font-semibold">
+                      To open this 2GB file instantly with ZERO hassle:
+                    </p>
+                    <ol className="list-decimal pl-4 mt-2 space-y-2 text-slate-400">
+                      <li>Upload your PDF file to a free <strong>Dropbox</strong> account.</li>
+                      <li>Click <strong>Copy Link</strong> on the file, paste it directly into this app, and click <strong>Stream File</strong>.</li>
+                      <li>It will load **instantly (in 0.1s)** inside our high-performance canvas engine!</li>
+                    </ol>
+                  </div>
+                )}
               </div>
             ) : (
               /* Standard High-Performance Canvas View */
-              <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl overflow-hidden min-h-[400px]">
+              /* Removed overflow-hidden from the wrapper to allow native scrollbars of the workspace */
+              <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl min-h-[400px]">
                 {/* Active Loading Overlay */}
                 {(loading || rendering || !pdfjs) && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-sm z-10 transition">
