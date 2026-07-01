@@ -41,7 +41,10 @@ export default function PdfViewer() {
     const initPdfjs = async () => {
       try {
         const library = await import("pdfjs-dist");
-        library.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+        
+        // Use UNPKG to dynamically fetch the worker matching your exact package version
+        library.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${library.version}/build/pdf.worker.min.js`;
+        
         setPdfjs(library);
       } catch (err: any) {
         console.error("Error loading PDF engine:", err);
