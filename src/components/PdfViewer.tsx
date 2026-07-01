@@ -36,14 +36,18 @@ export default function PdfViewer() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
 
-  // 1. Dynamically load the PDFJS library only on the client-side
+ // 1. Dynamically load the PDFJS library only on the client-side
   useEffect(() => {
     const initPdfjs = async () => {
       try {
         const library = await import("pdfjs-dist");
         
-        // Use UNPKG to dynamically fetch the worker matching your exact package version
-        library.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${library.version}/build/pdf.worker.min.js`;
+        // Detect if we are on a modern version (v4, v5, v6) which uses '.mjs',
+        // or an older version (v3) which uses '.js'.
+        const isModern = !library.version.startsWith("3");
+        const ext = isModern ? "mjs" : "js";
+        
+        library.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${library.version}/build/pdf.worker.min.${ext}`;
         
         setPdfjs(library);
       } catch (err: any) {
