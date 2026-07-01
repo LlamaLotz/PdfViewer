@@ -14,15 +14,39 @@ import {
   HelpCircle
 } from "lucide-react";
 
-// DO NOT import pdfjs-dist at the top-level. 
-// This prevents Next.js from compiling it on the server where DOMMatrix is missing.
+// Helper function to resolve Google Drive links & wrap with a CORS proxy
+const resolveStreamUrl = (inputUrl: string): string => {
+  const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit)/;
+  const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
+  
+  let fileId = "";
+  const match1 = inputUrl.match(driveRegex);
+  const match2 = inputUrl.match(driveOpenRegex);
+  
+  if (match1 && match1[1]) {
+    fileId = match1[1];
+  } else if (match2 && match2[1]) {
+    fileId = match2[1];
+  }
+  
+  if (fileId) {
+    // 1. Re-format to a raw content stream URL
+    const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
+    
+    // 2. Wrap it with a free, high-performance CORS proxy that supports HTTP Range Requests.
+    // This allows the browser to request chunks on-demand without CORS blocks.
+    return `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
+  }
+  
+  return inputUrl;
+};
 
 export default function PdfViewer() {
   const [url, setUrl] = useState<string>(
     "https://raw.githubusercontent.com/mozilla/pdf.js/ba2edeae/web/compressed.tracemonkey-pldi-09.pdf"
   );
   const [inputUrl, setInputUrl] = useState<string>("");
-  const [pdfjs, setPdfjs] = useState<any>(null); // dynamically imported library storage
+  const [pdfjs, setPdfjs] = useState<any>(null);
   const [pdf, setPdf] = useState<any>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -36,19 +60,14 @@ export default function PdfViewer() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
 
- // 1. Dynamically load the PDFJS library only on the client-side
+  // 1. Dynamically load the PDFJS library only on the client-side
   useEffect(() => {
     const initPdfjs = async () => {
       try {
         const library = await import("pdfjs-dist");
-        
-        // Detect if we are on a modern version (v4, v5, v6) which uses '.mjs',
-        // or an older version (v3) which uses '.js'.
         const isModern = !library.version.startsWith("3");
         const ext = isModern ? "mjs" : "js";
-        
         library.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${library.version}/build/pdf.worker.min.${ext}`;
-        
         setPdfjs(library);
       } catch (err: any) {
         console.error("Error loading PDF engine:", err);
@@ -60,7 +79,7 @@ export default function PdfViewer() {
 
   // 2. Load PDF on-demand with Range & Streaming properties enabled
   useEffect(() => {
-    if (!url || !pdfjs) return; // Wait until pdfjs is fully loaded on the client
+    if (!url || !pdfjs) return;
 
     let active = true;
     const loadPdf = async () => {
@@ -69,8 +88,11 @@ export default function PdfViewer() {
       setCurrentPage(1);
 
       try {
+        // Run input link through our converter/CORS resolver
+        const targetUrl = resolveStreamUrl(url);
+
         const loadingTask = pdfjs.getDocument({
-          url: url,
+          url: targetUrl,
           disableRange: false,     // Enables HTTP range requests
           disableStream: false,    // Enables streaming
           disableAutoFetch: true,  // Prevents prefetching of idle pages (crucial for 400MB PDFs)
@@ -182,7 +204,7 @@ export default function PdfViewer() {
             <Link2 className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
             <input
               type="url"
-              placeholder="Paste public PDF URL (e.g., AWS S3, Cloudflare R2, Dropbox)..."
+              placeholder="Paste Google Drive, AWS S3, or Dropbox public link..."
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
               className="w-full rounded-lg bg-slate-950 py-2 pl-9 pr-4 text-sm text-slate-300 placeholder-slate-500 outline-none ring-1 ring-slate-800 transition focus:ring-2 focus:ring-indigo-500"
