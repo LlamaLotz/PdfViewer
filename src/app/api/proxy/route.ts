@@ -11,7 +11,7 @@ interface RedirectResult {
   cookies: string;
 }
 
-// Recursive redirect follower that accumulates cookies across redirects
+// Recursive redirect follower that sanitizes and accumulates cookies
 async function fetchWithRedirect(
   initialUrl: string, 
   headers: Record<string, string>, 
@@ -36,11 +36,16 @@ async function fetchWithRedirect(
     ? res.headers.getSetCookie() 
     : [res.headers.get("set-cookie") || ""];
     
-  const newCookiesStr = setCookies.filter(Boolean).join("; ");
+  // SANITIZER: Extract ONLY the key=value pairs, discarding attributes like Path, Secure, HttpOnly, etc.
+  const cleanNewCookies = setCookies
+    .map(cookie => cookie.split(";")[0].trim())
+    .filter(Boolean)
+    .join("; ");
   
+  // Combine previously accumulated and new sanitized cookies cleanly
   const updatedCookies = accumulatedCookies 
-    ? (newCookiesStr ? `${accumulatedCookies}; ${newCookiesStr}` : accumulatedCookies)
-    : newCookiesStr;
+    ? (cleanNewCookies ? `${accumulatedCookies}; ${cleanNewCookies}` : accumulatedCookies)
+    : cleanNewCookies;
 
   // Intercept 301, 302, 303, 307, 308 redirect statuses
   if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
@@ -69,7 +74,7 @@ export async function GET(request: NextRequest) {
   const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
   try {
-    // 1. Initial request with manual recursive redirect and cookie accumulation
+    // 1. Initial request with a real browser User-Agent & manual recursive redirect handling
     const { response: firstRes, cookies: firstCookies } = await fetchWithRedirect(checkUrl, {
       "User-Agent": USER_AGENT,
     });
@@ -106,7 +111,7 @@ export async function GET(request: NextRequest) {
       downloadUrl += `&at=${atValue}`;
     }
 
-    // 2. Fetch the final binary download link with cookies, following CDN redirects manually
+    // 2. Fetch the final binary download link with sanitized cookies, following CDN redirects manually
     const { response: finalRes } = await fetchWithRedirect(downloadUrl, {
       "User-Agent": USER_AGENT,
     }, firstCookies);
