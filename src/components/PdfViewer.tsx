@@ -16,76 +16,6 @@ import {
   FolderOpen
 } from "lucide-react";
 
-// Automated Google Drive Bypass Scraper
-const resolveGoogleDriveUrl = async (fileId: string): Promise<string> => {
-  const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
-  
-  try {
-    const res = await fetch(proxyUrl);
-    const htmlText = await res.text();
-    
-    // Scrape the dynamic confirm token and uuid from Google's warning form
-    const confirmMatch = htmlText.match(/name="confirm" value="([^"]+)"/) || htmlText.match(/confirm=([a-zA-Z0-9\-_]+)/);
-    const uuidMatch = htmlText.match(/name="uuid" value="([^"]+)"/);
-    
-    if (confirmMatch) {
-      let directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirmMatch[1]}`;
-      if (uuidMatch) {
-        directUrl += `&uuid=${uuidMatch[1]}`;
-      }
-      return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
-    }
-    
-    // Small files do not trigger warning forms; use the direct download link
-    return `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
-  } catch (err) {
-    console.error("Automated Google Drive bypass failed, falling back:", err);
-    return `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
-  }
-};
-
-// Helper function to resolve Google Drive / Dropbox / Pixeldrain URLs
-const resolveStreamUrl = async (inputUrl: string): Promise<string> => {
-  // 1. Auto-convert Dropbox links from web-preview to CORS-native direct streams
-  if (inputUrl.includes("dropbox.com")) {
-    return inputUrl
-      .replace("www.dropbox.com", "dl.dropboxusercontent.com")
-      .replace("dl=0", "dl=1")
-      .replace("dl=default", "dl=1");
-  }
-
-  // 2. Auto-convert Pixeldrain links
-  if (inputUrl.includes("pixeldrain.com")) {
-    const pixelMatch = inputUrl.match(/\/u\/([a-zA-Z0-9_-]+)/);
-    if (pixelMatch && pixelMatch[1]) {
-      const fileId = pixelMatch[1];
-      const directUrl = `https://pixeldrain.com/api/file/${fileId}`;
-      return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
-    }
-  }
-
-  // 3. Google Drive links (triggers the scraper)
-  const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit)/;
-  const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
-  
-  let fileId = "";
-  const match1 = inputUrl.match(driveRegex);
-  const match2 = inputUrl.match(driveOpenRegex);
-  
-  if (match1 && match1[1]) {
-    fileId = match1[1];
-  } else if (match2 && match2[1]) {
-    fileId = match2[1];
-  }
-  
-  if (fileId) {
-    return await resolveGoogleDriveUrl(fileId);
-  }
-  
-  return inputUrl;
-};
-
 export default function PdfViewer() {
   const [url, setUrl] = useState<string>(
     "https://raw.githubusercontent.com/mozilla/pdf.js/ba2edeae/web/compressed.tracemonkey-pldi-09.pdf"
@@ -103,8 +33,25 @@ export default function PdfViewer() {
   const [showInstructions, setShowInstructions] = useState<boolean>(false);
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
 
+  // Smart Detection: Stores the active Google Drive File ID if a Drive link is opened
+  const [googleDriveFileId, setGoogleDriveFileId] = useState<string | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
+
+  // Extracts Google Drive File ID from standard sharing links
+  const getGoogleDriveId = (inputUrl: string): string | null => {
+    const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit|preview)/;
+    const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
+    
+    const match1 = inputUrl.match(driveRegex);
+    if (match1 && match1[1]) return match1[1];
+    
+    const match2 = inputUrl.match(driveOpenRegex);
+    if (match2 && match2[1]) return match2[1];
+    
+    return null;
+  };
 
   // 1. Dynamically load the PDFJS library only on the client-side
   useEffect(() => {
@@ -127,6 +74,19 @@ export default function PdfViewer() {
   useEffect(() => {
     if (!url || !pdfjs) return;
 
+    // Detect if the user pasted a Google Drive link
+    const driveId = getGoogleDriveId(url);
+    if (driveId) {
+      setGoogleDriveFileId(driveId);
+      setPdf(null); // Clear custom viewer states
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    // If it's a standard link, close iframe mode and render via custom PDFJS canvas
+    setGoogleDriveFileId(null);
+
     let active = true;
     const loadPdf = async () => {
       setLoading(true);
@@ -134,15 +94,29 @@ export default function PdfViewer() {
       setCurrentPage(1);
 
       try {
-        const targetUrl = await resolveStreamUrl(url);
+        let targetUrl = url;
 
-        if (!active) return;
+        // Auto-convert Dropbox links from web-preview to CORS-native direct streams (No proxy needed!)
+        if (url.includes("dropbox.com")) {
+          targetUrl = url
+            .replace("www.dropbox.com", "dl.dropboxusercontent.com")
+            .replace("dl=0", "dl=1")
+            .replace("dl=default", "dl=1");
+        }
+        // Auto-convert Pixeldrain links
+        else if (url.includes("pixeldrain.com")) {
+          const pixelMatch = url.match(/\/u\/([a-zA-Z0-9_-]+)/);
+          if (pixelMatch && pixelMatch[1]) {
+            const fileId = pixelMatch[1];
+            targetUrl = `https://pixeldrain.com/api/file/${fileId}`;
+          }
+        }
 
         const loadingTask = pdfjs.getDocument({
           url: targetUrl,
-          disableRange: false,     // Enables HTTP range requests
-          disableStream: false,    // Enables streaming
-          disableAutoFetch: true,  // Prevents prefetching of idle pages (crucial for massive PDFs)
+          disableRange: false,
+          disableStream: false,
+          disableAutoFetch: true,
         });
 
         const pdfDoc = await loadingTask.promise;
@@ -154,11 +128,7 @@ export default function PdfViewer() {
       } catch (err: any) {
         console.error("PDF Loading error: ", err);
         if (active) {
-          setError(
-            err.message?.includes("CORS") || err.name === "NetworkError"
-              ? "CORS Blocked: The host server does not allow Cross-Origin Resource Sharing. Ensure CORS is enabled on your bucket."
-              : `Failed to open PDF document: ${err.message || "Unknown error occurred"}`
-          );
+          setError(`Failed to open PDF document: ${err.message || "Unknown error occurred"}`);
           setLoading(false);
         }
       }
@@ -168,7 +138,6 @@ export default function PdfViewer() {
 
     return () => {
       active = false;
-      // Memory Management: Revoke blob URLs when we change documents to prevent memory leaks
       if (url.startsWith("blob:")) {
         URL.revokeObjectURL(url);
       }
@@ -237,7 +206,7 @@ export default function PdfViewer() {
   const handleLocalFileLoad = (file: File) => {
     if (file && file.type === "application/pdf") {
       setError(null);
-      const localBlobUrl = URL.createObjectURL(file); // Native browser-space streaming link
+      const localBlobUrl = URL.createObjectURL(file);
       setUrl(localBlobUrl);
     } else {
       alert("Please select a valid PDF file.");
@@ -331,94 +300,98 @@ export default function PdfViewer() {
 
       {/* Main Area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar - Jump to page */}
-        <div className="hidden w-64 flex-col border-r border-slate-800 bg-slate-900/50 md:flex">
-          <div className="p-4 border-b border-slate-800">
-            <h2 className="text-xs font-bold tracking-wider text-slate-400 uppercase">Documents Pages</h2>
-            <p className="text-xxs text-slate-500 mt-1">Chunked on-demand render</p>
+        {/* Sidebar - Jump to page (Only display if not in native Google Drive mode) */}
+        {!googleDriveFileId && (
+          <div className="hidden w-64 flex-col border-r border-slate-800 bg-slate-900/50 md:flex">
+            <div className="p-4 border-b border-slate-800">
+              <h2 className="text-xs font-bold tracking-wider text-slate-400 uppercase">Documents Pages</h2>
+              <p className="text-xxs text-slate-500 mt-1">Chunked on-demand render</p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 space-y-1">
+              {numPages > 0 ? (
+                Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
+                  <button
+                    key={pageNum}
+                    onClick={() => setCurrentPage(pageNum)}
+                    className={`w-full text-left px-3 py-1.5 rounded-md text-xs transition ${
+                      currentPage === pageNum
+                        ? "bg-indigo-600 text-white font-semibold"
+                        : "text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
+                    }`}
+                  >
+                    Page {pageNum}
+                  </button>
+                ))
+              ) : (
+                <div className="p-4 text-xs text-slate-500 text-center">No document loaded</div>
+              )}
+            </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {numPages > 0 ? (
-              Array.from({ length: numPages }, (_, i) => i + 1).map((pageNum) => (
-                <button
-                  key={pageNum}
-                  onClick={() => setCurrentPage(pageNum)}
-                  className={`w-full text-left px-3 py-1.5 rounded-md text-xs transition ${
-                    currentPage === pageNum
-                      ? "bg-indigo-600 text-white font-semibold"
-                      : "text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
-                  }`}
-                >
-                  Page {pageNum}
-                </button>
-              ))
-            ) : (
-              <div className="p-4 text-xs text-slate-500 text-center">No document loaded</div>
-            )}
-          </div>
-        </div>
+        )}
 
         {/* Canvas Display Viewport */}
         <div className="relative flex flex-1 flex-col overflow-hidden bg-slate-950">
-          {/* Controls Bar */}
-          <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/30 px-6 py-2">
-            <div className="flex items-center gap-2">
-              <button
-                disabled={currentPage <= 1 || loading}
-                onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
-                className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-30"
-              >
-                <ChevronLeft className="h-5 w-5" />
-              </button>
-              <span className="text-xs text-slate-300 font-medium select-none">
-                Page {currentPage} of {numPages || "?"}
-              </span>
-              <button
-                disabled={currentPage >= numPages || loading}
-                onClick={() => setCurrentPage((p) => Math.min(p + 1, numPages))}
-                className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-30"
-              >
-                <ChevronRight className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-1 border-r border-slate-800 pr-3">
+          {/* Controls Bar (Only display if not in Google Drive mode) */}
+          {!googleDriveFileId && (
+            <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/30 px-6 py-2">
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setZoom((z) => Math.max(z - 0.25, 0.5))}
-                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                  title="Zoom Out"
+                  disabled={currentPage <= 1 || loading}
+                  onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-30"
                 >
-                  <ZoomOut className="h-4 w-4" />
+                  <ChevronLeft className="h-5 w-5" />
                 </button>
-                <span className="text-xs text-slate-300 min-w-[3rem] text-center font-mono">
-                  {Math.round(zoom * 100)}%
+                <span className="text-xs text-slate-300 font-medium select-none">
+                  Page {currentPage} of {numPages || "?"}
                 </span>
                 <button
-                  onClick={() => setZoom((z) => Math.min(z + 0.25, 3.0))}
-                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                  title="Zoom In"
+                  disabled={currentPage >= numPages || loading}
+                  onClick={() => setCurrentPage((p) => Math.min(p + 1, numPages))}
+                  className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-30"
                 >
-                  <ZoomIn className="h-4 w-4" />
+                  <ChevronRight className="h-5 w-5" />
                 </button>
               </div>
 
-              <button
-                onClick={() => setRotation((r) => (r + 90) % 360)}
-                className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
-                title="Rotate 90°"
-              >
-                <RotateCw className="h-4 w-4" />
-              </button>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1 border-r border-slate-800 pr-3">
+                  <button
+                    onClick={() => setZoom((z) => Math.max(z - 0.25, 0.5))}
+                    className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut className="h-4 w-4" />
+                  </button>
+                  <span className="text-xs text-slate-300 min-w-[3rem] text-center font-mono">
+                    {Math.round(zoom * 100)}%
+                  </span>
+                  <button
+                    onClick={() => setZoom((z) => Math.min(z + 0.25, 3.0))}
+                    className="rounded p-1 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                    title="Zoom In"
+                  >
+                    <ZoomIn className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => setRotation((r) => (r + 90) % 360)}
+                  className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+                  title="Rotate 90°"
+                >
+                  <RotateCw className="h-4 w-4" />
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Active Work Area + Drag and Drop Wrapper */}
           <div 
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            className={`flex-1 overflow-auto p-8 flex flex-col justify-center items-center transition-all ${
+            className={`flex-1 overflow-auto p-4 flex flex-col justify-center items-center transition-all ${
               isDragOver ? "bg-indigo-950/25 border-4 border-dashed border-indigo-500/50" : ""
             }`}
           >
@@ -428,29 +401,23 @@ export default function PdfViewer() {
                 <p className="text-lg font-bold text-indigo-300">Drop your PDF file here</p>
                 <p className="text-xs text-slate-400">Instantly stream files up to 10GB</p>
               </div>
+            ) : googleDriveFileId ? (
+              /* Automatic Google Drive Native Streaming Viewer */
+              <div className="w-full h-full flex justify-center items-stretch">
+                <iframe
+                  src={`https://drive.google.com/file/d/${googleDriveFileId}/preview`}
+                  className="w-full max-w-6xl h-[calc(100vh-10rem)] border border-slate-800 rounded-xl shadow-2xl bg-slate-900"
+                  allow="autoplay"
+                />
+              </div>
             ) : error ? (
               <div className="max-w-md rounded-xl border border-rose-500/30 bg-rose-950/20 p-6 text-center shadow-lg">
                 <AlertTriangle className="mx-auto h-12 w-12 text-rose-500" />
                 <h3 className="mt-4 font-semibold text-rose-200">Failed to stream document</h3>
                 <p className="mt-2 text-xs text-rose-300/80 leading-relaxed">{error}</p>
-                
-                {url.includes("drive.usercontent.google.com") && (
-                  <div className="mt-5 text-left bg-slate-900 border border-amber-500/30 p-4 rounded-lg text-xs">
-                    <p className="font-bold text-amber-400 flex items-center gap-1">⚠️ Streaming Issue</p>
-                    <p className="text-slate-300 mt-2 leading-relaxed">
-                      Google Drive has blocked the automated streaming of this file.
-                    </p>
-                    <p className="text-slate-300 mt-2 font-semibold">
-                      Quickest zero-hassle workaround:
-                    </p>
-                    <ol className="list-decimal pl-4 mt-2 space-y-2 text-slate-400">
-                      <li>Download the PDF to your device.</li>
-                      <li>Click the **&quot;Open Local File&quot;** button in the top right. It will load instantly (even if 2GB) without uploading.</li>
-                    </ol>
-                  </div>
-                )}
               </div>
             ) : (
+              /* Standard High-Performance Canvas View */
               <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl overflow-hidden min-h-[400px]">
                 {/* Active Loading Overlay */}
                 {(loading || rendering || !pdfjs) && (
