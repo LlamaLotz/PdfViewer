@@ -14,7 +14,7 @@ import {
   HelpCircle
 } from "lucide-react";
 
-// Helper function to resolve Google Drive links & wrap with a CORS proxy
+// Helper function to dynamically resolve Google Drive / Dropbox URLs & wrap with CORS proxy
 const resolveStreamUrl = (inputUrl: string): string => {
   const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit)/;
   const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
@@ -30,11 +30,18 @@ const resolveStreamUrl = (inputUrl: string): string => {
   }
   
   if (fileId) {
-    // 1. Re-format to a raw content stream URL
-    const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
+    // 1. Re-format to a raw content stream URL with the "confirm=t" bypass flag!
+    // This tells Google Drive to bypass the virus scan prompt for files larger than 25MB.
+    const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
     
     // 2. Wrap it with AllOrigins free public proxy to bypass CORS blocks on Vercel
     return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
+  }
+
+  // 3. Auto-convert Dropbox links from web-preview to direct raw streams
+  if (inputUrl.includes("dropbox.com")) {
+    const rawUrl = inputUrl.replace("dl=0", "raw=1");
+    return `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`;
   }
   
   return inputUrl;
@@ -87,7 +94,6 @@ export default function PdfViewer() {
       setCurrentPage(1);
 
       try {
-        // Run input link through our converter/CORS resolver
         const targetUrl = resolveStreamUrl(url);
 
         const loadingTask = pdfjs.getDocument({
