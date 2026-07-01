@@ -13,16 +13,16 @@ import {
   FileText,
   HelpCircle
 } from "lucide-react";
-import * as pdfjsLib from "pdfjs-dist";
 
-// Leverage cdnjs to host the worker thread, avoiding complex Next.js configurations
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+// DO NOT import pdfjs-dist at the top-level. 
+// This prevents Next.js from compiling it on the server where DOMMatrix is missing.
 
 export default function PdfViewer() {
   const [url, setUrl] = useState<string>(
     "https://raw.githubusercontent.com/mozilla/pdf.js/ba2edeae/web/compressed.tracemonkey-pldi-09.pdf"
   );
   const [inputUrl, setInputUrl] = useState<string>("");
+  const [pdfjs, setPdfjs] = useState<any>(null); // dynamically imported library storage
   const [pdf, setPdf] = useState<any>(null);
   const [numPages, setNumPages] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -36,9 +36,24 @@ export default function PdfViewer() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
 
-  // Load PDF on-demand with Range & Streaming properties enabled
+  // 1. Dynamically load the PDFJS library only on the client-side
   useEffect(() => {
-    if (!url) return;
+    const initPdfjs = async () => {
+      try {
+        const library = await import("pdfjs-dist");
+        library.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+        setPdfjs(library);
+      } catch (err: any) {
+        console.error("Error loading PDF engine:", err);
+        setError("Failed to initialize PDF rendering engine.");
+      }
+    };
+    initPdfjs();
+  }, []);
+
+  // 2. Load PDF on-demand with Range & Streaming properties enabled
+  useEffect(() => {
+    if (!url || !pdfjs) return; // Wait until pdfjs is fully loaded on the client
 
     let active = true;
     const loadPdf = async () => {
@@ -47,7 +62,7 @@ export default function PdfViewer() {
       setCurrentPage(1);
 
       try {
-        const loadingTask = pdfjsLib.getDocument({
+        const loadingTask = pdfjs.getDocument({
           url: url,
           disableRange: false,     // Enables HTTP range requests
           disableStream: false,    // Enables streaming
@@ -78,9 +93,9 @@ export default function PdfViewer() {
     return () => {
       active = false;
     };
-  }, [url]);
+  }, [url, pdfjs]);
 
-  // Canvas rendering procedure with Device Pixel Ratio adjustment
+  // 3. Canvas rendering procedure
   const renderPage = useCallback(async () => {
     if (!pdf || !canvasRef.current) return;
 
@@ -125,7 +140,7 @@ export default function PdfViewer() {
     renderPage();
   }, [renderPage]);
 
-  // Keyboard navigation event handlers
+  // 4. Keyboard navigation event handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") {
@@ -282,11 +297,11 @@ export default function PdfViewer() {
             ) : (
               <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl overflow-hidden min-h-[400px]">
                 {/* Active Loading Overlay */}
-                {(loading || rendering) && (
+                {(loading || rendering || !pdfjs) && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/70 backdrop-blur-sm z-10 transition">
                     <Loader2 className="h-8 w-8 animate-spin text-indigo-400" />
                     <p className="mt-3 text-xs text-slate-300 font-medium">
-                      {loading ? "Streaming range-chunks..." : "Rendering view pixels..."}
+                      {!pdfjs ? "Loading PDF core..." : loading ? "Streaming range-chunks..." : "Rendering view pixels..."}
                     </p>
                   </div>
                 )}
