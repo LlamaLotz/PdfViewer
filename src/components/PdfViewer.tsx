@@ -33,9 +33,8 @@ const resolveStreamUrl = (inputUrl: string): string => {
     // 1. Re-format to a raw content stream URL
     const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
     
-    // 2. Wrap it with a free, high-performance CORS proxy that supports HTTP Range Requests.
-    // This allows the browser to request chunks on-demand without CORS blocks.
-    return `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
+    // 2. Wrap it with AllOrigins free public proxy to bypass CORS blocks on Vercel
+    return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
   }
   
   return inputUrl;
