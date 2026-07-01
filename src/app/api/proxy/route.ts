@@ -53,8 +53,10 @@ export async function GET(request: NextRequest) {
     // If it's a small file, it downloads directly without a virus warning page
     if (!contentType.includes("text/html")) {
       return new Response(res.body, {
+        status: res.status,
         headers: {
-          "Content-Type": "application/pdf",
+          "Content-Type": contentType || "application/pdf",
+          "Content-Length": res.headers.get("content-length") || "",
           "Access-Control-Allow-Origin": "*",
         },
       });
@@ -63,21 +65,23 @@ export async function GET(request: NextRequest) {
     const htmlText = await res.text();
     const cookiesString = cookiesArray.filter(Boolean).join("; ");
 
-    // Multi-layer confirm token extraction:
-    // Option A: Extract from the accumulated download_warning cookie directly
-    const cookieMatch = cookiesString.match(/download_warning_[^=]+=([^;]+)/);
-    
-    // Option B: Extract from the HTML text (form action or inputs)
-    const confirmMatch = 
-      htmlText.match(/confirm=([0-9A-Za-z_-]+)/) || 
-      htmlText.match(/name="confirm" value="([^"]+)"/);
+    // Extract both the "uuid" and "at" security parameters from Google's HTML form
+    const uuidMatch = htmlText.match(/name="uuid" value="([^"]+)"/) || htmlText.match(/uuid=([a-zA-Z0-9\-_]+)/);
+    const uuidValue = uuidMatch ? uuidMatch[1] : "";
 
-    // Get the confirm token (use cookie first, then HTML, then fall back to 't')
-    const confirmToken = (cookieMatch && cookieMatch[1]) || (confirmMatch && confirmMatch[1]) || "t";
+    const atMatch = htmlText.match(/name="at" value="([^"]+)"/);
+    const atValue = atMatch ? atMatch[1] : "";
 
-    const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=${confirmToken}`;
+    // Target Google's raw content download endpoint directly to prevent cookies from being stripped
+    let downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+    if (uuidValue) {
+      downloadUrl += `&uuid=${uuidValue}`;
+    }
+    if (atValue) {
+      downloadUrl += `&at=${atValue}`;
+    }
 
-    // 2. Authenticated second request using cookies and browser User-Agent
+    // 2. Authenticated direct request using accumulated cookies and Chrome headers
     const downloadRes = await fetch(downloadUrl, {
       headers: {
         "User-Agent": USER_AGENT,
@@ -85,11 +89,14 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    // 3. Stream the raw binary content back with preserved headers
     return new Response(downloadRes.body, {
+      status: downloadRes.status,
       headers: {
-        "Content-Type": "application/pdf",
+        "Content-Type": downloadRes.headers.get("content-type") || "application/pdf",
+        "Content-Length": downloadRes.headers.get("content-length") || "",
         "Access-Control-Allow-Origin": "*",
-        "Content-Disposition": `inline; filename="document.pdf"`,
+        "Content-Disposition": downloadRes.headers.get("content-disposition") || `inline; filename="document.pdf"`,
       },
     });
   } catch (err: any) {
