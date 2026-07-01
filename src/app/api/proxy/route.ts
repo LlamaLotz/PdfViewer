@@ -1,8 +1,10 @@
 import { NextRequest } from "next/server";
 
-// CRUCIAL: We use Edge runtime because it has a 5-minute stream timeout
-// and bypasses the 4.5MB response size limit completely.
+// We use Edge runtime because it has a 5-minute stream timeout
+// and bypasses Vercel's 4.5MB response limit completely.
 export const runtime = "edge";
+
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -15,11 +17,16 @@ export async function GET(request: NextRequest) {
   const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
   try {
-    // 1. Initial request to Google Drive to check if it's a small or large file
-    const res = await fetch(checkUrl);
+    // 1. Initial request with a real browser User-Agent to avoid bot blocking
+    const res = await fetch(checkUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+      },
+    });
+
     const contentType = res.headers.get("content-type") || "";
 
-    // If it's a small file (under 25MB), Google streams the raw PDF immediately
+    // If it's a small file, it downloads directly without a virus warning page
     if (!contentType.includes("text/html")) {
       return new Response(res.body, {
         headers: {
@@ -29,24 +36,27 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // If it's a large file (over 25MB), Google serves an HTML warning page.
-    // We scrape the confirm token and collect the session cookies.
     const htmlText = await res.text();
-    const confirmMatch = htmlText.match(/confirm=([0-9A-Za-z_-]+)/);
-    
-    if (!confirmMatch) {
-      return new Response(
-        "Could not bypass Google virus scan. Ensure your Google Drive file is set to 'Anyone with the link can view'.",
-        { status: 500 }
-      );
-    }
-
     const cookies = res.headers.get("set-cookie") || "";
-    const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=${confirmMatch[1]}`;
 
-    // 2. Make the authenticated second request using Google's session cookies
+    // Multi-layer confirm token extraction:
+    // Option A: Extract from the download_warning cookie directly
+    const cookieMatch = cookies.match(/download_warning_[^=]+=([^;]+)/);
+    
+    // Option B: Extract from the HTML text (form action or inputs)
+    const confirmMatch = 
+      htmlText.match(/confirm=([0-9A-Za-z_-]+)/) || 
+      htmlText.match(/name="confirm" value="([^"]+)"/);
+
+    // Get the confirm token (use cookie first, then HTML, then fall back to 't')
+    const confirmToken = (cookieMatch && cookieMatch[1]) || (confirmMatch && confirmMatch[1]) || "t";
+
+    const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=${confirmToken}`;
+
+    // 2. Authenticated second request using cookies and browser User-Agent
     const downloadRes = await fetch(downloadUrl, {
       headers: {
+        "User-Agent": USER_AGENT,
         Cookie: cookies,
       },
     });
