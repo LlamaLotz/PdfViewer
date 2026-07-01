@@ -11,11 +11,61 @@ import {
   Link2, 
   AlertTriangle, 
   FileText,
-  HelpCircle
+  HelpCircle,
+  Upload,
+  FolderOpen
 } from "lucide-react";
 
-// Helper function to dynamically resolve Google Drive / Dropbox URLs & wrap with CORS proxy
-const resolveStreamUrl = (inputUrl: string): string => {
+// Automated Google Drive Bypass Scraper
+const resolveGoogleDriveUrl = async (fileId: string): Promise<string> => {
+  const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
+  
+  try {
+    const res = await fetch(proxyUrl);
+    const htmlText = await res.text();
+    
+    // Scrape the dynamic confirm token and uuid from Google's warning form
+    const confirmMatch = htmlText.match(/name="confirm" value="([^"]+)"/) || htmlText.match(/confirm=([a-zA-Z0-9\-_]+)/);
+    const uuidMatch = htmlText.match(/name="uuid" value="([^"]+)"/);
+    
+    if (confirmMatch) {
+      let directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirmMatch[1]}`;
+      if (uuidMatch) {
+        directUrl += `&uuid=${uuidMatch[1]}`;
+      }
+      return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
+    }
+    
+    // Small files do not trigger warning forms; use the direct download link
+    return `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
+  } catch (err) {
+    console.error("Automated Google Drive bypass failed, falling back:", err);
+    return `https://api.allorigins.win/raw?url=${encodeURIComponent(checkUrl)}`;
+  }
+};
+
+// Helper function to resolve Google Drive / Dropbox / Pixeldrain URLs
+const resolveStreamUrl = async (inputUrl: string): Promise<string> => {
+  // 1. Auto-convert Dropbox links from web-preview to CORS-native direct streams
+  if (inputUrl.includes("dropbox.com")) {
+    return inputUrl
+      .replace("www.dropbox.com", "dl.dropboxusercontent.com")
+      .replace("dl=0", "dl=1")
+      .replace("dl=default", "dl=1");
+  }
+
+  // 2. Auto-convert Pixeldrain links
+  if (inputUrl.includes("pixeldrain.com")) {
+    const pixelMatch = inputUrl.match(/\/u\/([a-zA-Z0-9_-]+)/);
+    if (pixelMatch && pixelMatch[1]) {
+      const fileId = pixelMatch[1];
+      const directUrl = `https://pixeldrain.com/api/file/${fileId}`;
+      return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
+    }
+  }
+
+  // 3. Google Drive links (triggers the scraper)
   const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit)/;
   const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
   
@@ -30,18 +80,7 @@ const resolveStreamUrl = (inputUrl: string): string => {
   }
   
   if (fileId) {
-    // 1. Re-format to a raw content stream URL with the "confirm=t" bypass flag!
-    // This tells Google Drive to bypass the virus scan prompt for files larger than 25MB.
-    const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-    
-    // 2. Wrap it with AllOrigins free public proxy to bypass CORS blocks on Vercel
-    return `https://api.allorigins.win/raw?url=${encodeURIComponent(directUrl)}`;
-  }
-
-  // 3. Auto-convert Dropbox links from web-preview to direct raw streams
-  if (inputUrl.includes("dropbox.com")) {
-    const rawUrl = inputUrl.replace("dl=0", "raw=1");
-    return `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`;
+    return await resolveGoogleDriveUrl(fileId);
   }
   
   return inputUrl;
@@ -62,6 +101,7 @@ export default function PdfViewer() {
   const [rendering, setRendering] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [showInstructions, setShowInstructions] = useState<boolean>(false);
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
@@ -94,13 +134,15 @@ export default function PdfViewer() {
       setCurrentPage(1);
 
       try {
-        const targetUrl = resolveStreamUrl(url);
+        const targetUrl = await resolveStreamUrl(url);
+
+        if (!active) return;
 
         const loadingTask = pdfjs.getDocument({
           url: targetUrl,
           disableRange: false,     // Enables HTTP range requests
           disableStream: false,    // Enables streaming
-          disableAutoFetch: true,  // Prevents prefetching of idle pages (crucial for 400MB PDFs)
+          disableAutoFetch: true,  // Prevents prefetching of idle pages (crucial for massive PDFs)
         });
 
         const pdfDoc = await loadingTask.promise;
@@ -126,6 +168,10 @@ export default function PdfViewer() {
 
     return () => {
       active = false;
+      // Memory Management: Revoke blob URLs when we change documents to prevent memory leaks
+      if (url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
     };
   }, [url, pdfjs]);
 
@@ -187,6 +233,39 @@ export default function PdfViewer() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [numPages]);
 
+  // 5. Handle Local File Uploads (Zero-Server-Streaming)
+  const handleLocalFileLoad = (file: File) => {
+    if (file && file.type === "application/pdf") {
+      setError(null);
+      const localBlobUrl = URL.createObjectURL(file); // Native browser-space streaming link
+      setUrl(localBlobUrl);
+    } else {
+      alert("Please select a valid PDF file.");
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleLocalFileLoad(file);
+  };
+
+  // Drag and Drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleLocalFileLoad(file);
+  };
+
   const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (inputUrl.trim()) {
@@ -209,7 +288,7 @@ export default function PdfViewer() {
             <Link2 className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
             <input
               type="url"
-              placeholder="Paste Google Drive, AWS S3, or Dropbox public link..."
+              placeholder="Paste Google Drive, Dropbox, or Pixeldrain sharing link..."
               value={inputUrl}
               onChange={(e) => setInputUrl(e.target.value)}
               className="w-full rounded-lg bg-slate-950 py-2 pl-9 pr-4 text-sm text-slate-300 placeholder-slate-500 outline-none ring-1 ring-slate-800 transition focus:ring-2 focus:ring-indigo-500"
@@ -223,13 +302,31 @@ export default function PdfViewer() {
           </button>
         </form>
 
-        <button
-          onClick={() => setShowInstructions(!showInstructions)}
-          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-indigo-400 transition"
-        >
-          <HelpCircle className="h-4 w-4" />
-          Streaming Help
-        </button>
+        {/* Local File Selector Button */}
+        <div className="flex items-center gap-3">
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={handleFileChange}
+            id="local-file-picker"
+            className="hidden"
+          />
+          <label
+            htmlFor="local-file-picker"
+            className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold hover:bg-slate-700 cursor-pointer transition border border-slate-700"
+          >
+            <FolderOpen className="h-4 w-4 text-indigo-400" />
+            <span>Open Local File (Up to 10GB)</span>
+          </label>
+
+          <button
+            onClick={() => setShowInstructions(!showInstructions)}
+            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-indigo-400 transition"
+          >
+            <HelpCircle className="h-4 w-4" />
+            Streaming Help
+          </button>
+        </div>
       </header>
 
       {/* Main Area */}
@@ -316,17 +413,42 @@ export default function PdfViewer() {
             </div>
           </div>
 
-          {/* Active Work Area */}
-          <div className="flex-1 overflow-auto p-8 flex justify-center items-start">
-            {error ? (
+          {/* Active Work Area + Drag and Drop Wrapper */}
+          <div 
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`flex-1 overflow-auto p-8 flex flex-col justify-center items-center transition-all ${
+              isDragOver ? "bg-indigo-950/25 border-4 border-dashed border-indigo-500/50" : ""
+            }`}
+          >
+            {isDragOver ? (
+              <div className="flex flex-col items-center gap-4 pointer-events-none animate-pulse">
+                <Upload className="h-16 w-16 text-indigo-400" />
+                <p className="text-lg font-bold text-indigo-300">Drop your PDF file here</p>
+                <p className="text-xs text-slate-400">Instantly stream files up to 10GB</p>
+              </div>
+            ) : error ? (
               <div className="max-w-md rounded-xl border border-rose-500/30 bg-rose-950/20 p-6 text-center shadow-lg">
                 <AlertTriangle className="mx-auto h-12 w-12 text-rose-500" />
                 <h3 className="mt-4 font-semibold text-rose-200">Failed to stream document</h3>
                 <p className="mt-2 text-xs text-rose-300/80 leading-relaxed">{error}</p>
-                <div className="mt-4 text-left text-xxs bg-slate-900 p-3 rounded border border-slate-800">
-                  <p className="font-bold text-slate-400">Common solution:</p>
-                  <p className="text-slate-500 mt-1">Directly download the file, or load it from a service featuring open CORS policies (e.g. AWS S3, Cloudflare R2, or GitHub Pages).</p>
-                </div>
+                
+                {url.includes("drive.usercontent.google.com") && (
+                  <div className="mt-5 text-left bg-slate-900 border border-amber-500/30 p-4 rounded-lg text-xs">
+                    <p className="font-bold text-amber-400 flex items-center gap-1">⚠️ Streaming Issue</p>
+                    <p className="text-slate-300 mt-2 leading-relaxed">
+                      Google Drive has blocked the automated streaming of this file.
+                    </p>
+                    <p className="text-slate-300 mt-2 font-semibold">
+                      Quickest zero-hassle workaround:
+                    </p>
+                    <ol className="list-decimal pl-4 mt-2 space-y-2 text-slate-400">
+                      <li>Download the PDF to your device.</li>
+                      <li>Click the **&quot;Open Local File&quot;** button in the top right. It will load instantly (even if 2GB) without uploading.</li>
+                    </ol>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl overflow-hidden min-h-[400px]">
@@ -352,7 +474,7 @@ export default function PdfViewer() {
           <div className="max-w-lg rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
             <h3 className="text-md font-semibold text-slate-100">Configuring Massive File Streaming</h3>
             <p className="mt-3 text-xs leading-relaxed text-slate-400">
-              For files exceeding **100MB** up to **400MB**, this app avoids downloading full packages by making partial requests. However, the host cloud storage has structural requirements:
+              For files exceeding **100MB** up to **2GB**, this app avoids downloading full packages by making partial requests. However, the host cloud storage has structural requirements:
             </p>
             <ul className="mt-4 list-disc pl-5 text-xs text-slate-400 space-y-2">
               <li>
