@@ -16,9 +16,9 @@ import {
   Upload
 } from "lucide-react";
 
-// Helper function to dynamically resolve Dropbox / Pixeldrain URLs
+// Auto-resolves links into direct streaming assets
 const resolveStreamUrl = (inputUrl: string): string => {
-  // 1. Auto-convert Dropbox links from web-preview to CORS-native direct streams (No proxy needed!)
+  // 1. Convert Dropbox links
   if (inputUrl.includes("dropbox.com")) {
     return inputUrl
       .replace("www.dropbox.com", "dl.dropboxusercontent.com")
@@ -26,13 +26,31 @@ const resolveStreamUrl = (inputUrl: string): string => {
       .replace("dl=default", "dl=1");
   }
 
-  // 2. Auto-convert Pixeldrain links (supports free anonymous uploads up to 20GB)
+  // 2. Convert Pixeldrain links
   if (inputUrl.includes("pixeldrain.com")) {
     const pixelMatch = inputUrl.match(/\/u\/([a-zA-Z0-9_-]+)/);
     if (pixelMatch && pixelMatch[1]) {
       const fileId = pixelMatch[1];
       return `https://pixeldrain.com/api/file/${fileId}`;
     }
+  }
+
+  // 3. Convert Google Drive links to our internal Edge streaming proxy
+  const driveRegex = /\/file\/d\/([a-zA-Z0-9_-]+)\/(view|edit|preview)/;
+  const driveOpenRegex = /open\?id=([a-zA-Z0-9_-]+)/;
+  
+  let fileId = "";
+  const match1 = inputUrl.match(driveRegex);
+  const match2 = inputUrl.match(driveOpenRegex);
+  
+  if (match1 && match1[1]) {
+    fileId = match1[1];
+  } else if (match2 && match2[1]) {
+    fileId = match2[1];
+  }
+  
+  if (fileId) {
+    return `/api/proxy?id=${fileId}`;
   }
   
   return inputUrl;
@@ -106,7 +124,7 @@ export default function PdfViewer() {
         if (active) {
           setError(
             err.message?.includes("CORS") || err.name === "NetworkError"
-              ? "CORS Blocked: Google Drive or this host server strictly blocks direct browser streaming. Please use a Dropbox or Pixeldrain link."
+              ? "Access Blocked: Ensure your file sharing settings in Google Drive or Dropbox are set to 'Anyone with the link can view'."
               : `Failed to open PDF document: ${err.message || "Unknown error occurred"}`
           );
           setLoading(false);
@@ -363,7 +381,6 @@ export default function PdfViewer() {
           </div>
 
           {/* Active Work Area + Drag and Drop Wrapper */}
-          {/* Changed flex layout to justify-center and items-start for native scrolling when zoomed */}
           <div 
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -383,27 +400,9 @@ export default function PdfViewer() {
                 <AlertTriangle className="mx-auto h-12 w-12 text-rose-500" />
                 <h3 className="mt-4 font-semibold text-rose-200">Failed to stream document</h3>
                 <p className="mt-2 text-xs text-rose-300/80 leading-relaxed">{error}</p>
-                
-                {url.includes("api/proxy") && (
-                  <div className="mt-5 text-left bg-slate-900 border border-amber-500/30 p-4 rounded-lg text-xs">
-                    <p className="font-bold text-amber-400 flex items-center gap-1">⚠️ Google Drive Limitation</p>
-                    <p className="text-slate-300 mt-2 leading-relaxed">
-                      Google Drive strictly blocks direct streaming for large documents.
-                    </p>
-                    <p className="text-slate-300 mt-2 font-semibold">
-                      To open this 2GB file instantly with ZERO hassle:
-                    </p>
-                    <ol className="list-decimal pl-4 mt-2 space-y-2 text-slate-400">
-                      <li>Upload your PDF file to a free <strong>Dropbox</strong> account.</li>
-                      <li>Click <strong>Copy Link</strong> on the file, paste it directly into this app, and click <strong>Stream File</strong>.</li>
-                      <li>It will load **instantly (in 0.1s)** inside our high-performance canvas engine!</li>
-                    </ol>
-                  </div>
-                )}
               </div>
             ) : (
               /* Standard High-Performance Canvas View */
-              /* Removed overflow-hidden from the wrapper to allow native scrollbars of the workspace */
               <div className="relative border border-slate-800 rounded bg-slate-900 shadow-2xl min-h-[400px]">
                 {/* Active Loading Overlay */}
                 {(loading || rendering || !pdfjs) && (

@@ -39,22 +39,32 @@ export async function GET(request: NextRequest) {
     }
 
     const htmlText = await firstRes.text();
-    const setCookieHeader = firstRes.headers.get("set-cookie") || "";
+    
+    // Safely collect Set-Cookie headers in Edge Runtime
+    const setCookies = typeof firstRes.headers.getSetCookie === "function" 
+      ? firstRes.headers.getSetCookie() 
+      : [firstRes.headers.get("set-cookie") || ""];
 
-    // Extract ONLY the critical download_warning cookie (e.g. "download_warning_123=ABCD")
-    const warningCookieMatch = setCookieHeader.match(/(download_warning_[^=]+=[^;,\s]+)/);
-    const warningCookie = warningCookieMatch ? warningCookieMatch[1] : "";
+    // Clean up cookies: extract ONLY the key=value pairs, ignoring Path, Domain, etc.
+    const cleanCookies = setCookies
+      .map(cookie => cookie.split(";")[0].trim())
+      .filter(Boolean)
+      .join("; ");
 
-    // Extract the confirm token (use cookie value first, then HTML, then fall back to 't')
-    const confirmToken = warningCookieMatch 
-      ? warningCookieMatch[1].split("=")[1] 
+    // Extract dynamic security parameters from the HTML warning page
+    const uuidMatch = htmlText.match(/name="uuid" value="([^"]+)"/) || htmlText.match(/uuid=([a-zA-Z0-9\-_]+)/);
+    const uuidValue = uuidMatch ? uuidMatch[1] : "";
+
+    const atMatch = htmlText.match(/name="at" value="([^"]+)"/);
+    const atValue = atMatch ? atMatch[1] : "";
+
+    // Extract confirm token from the sanitized cookies, falling back to HTML
+    const cookieTokenMatch = cookiesStringMatch(cleanCookies);
+    const confirmToken = cookieTokenMatch 
+      ? cookieTokenMatch 
       : (htmlText.match(/confirm=([0-9A-Za-z_-]+)/)?.[1] || "t");
 
-    // Extract uuid and at tokens from the HTML
-    const uuidValue = htmlText.match(/name="uuid" value="([^"]+)"/)?.[1] || "";
-    const atValue = htmlText.match(/name="at" value="([^"]+)"/)?.[1] || "";
-
-    // Construct the direct download link
+    // Target the direct download endpoint on Google content servers
     let downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirmToken}`;
     if (uuidValue) {
       downloadUrl += `&uuid=${uuidValue}`;
@@ -63,12 +73,14 @@ export async function GET(request: NextRequest) {
       downloadUrl += `&at=${atValue}`;
     }
 
-    // 2. Fetch the final binary download link with cookies, letting fetch handle redirects natively
+    // 2. Fetch the final binary stream. We let fetch handle the 303 redirect natively (redirect: "follow")
+    // so it successfully follows Google's CDN redirection.
     const downloadRes = await fetch(downloadUrl, {
       headers: {
         "User-Agent": USER_AGENT,
-        "Cookie": warningCookie, // Only send the sanitized download_warning cookie
+        "Cookie": cleanCookies, // Only send the sanitized download_warning cookie
       },
+      redirect: "follow", // Native automatic redirection to the physical CDN storage node!
     });
 
     // 3. Stream the raw binary content back with preserved headers
@@ -85,4 +97,10 @@ export async function GET(request: NextRequest) {
     console.error("API Proxy Error:", err);
     return new Response(`Failed to stream Google Drive file: ${err.message}`, { status: 500 });
   }
+}
+
+// Utility to match the download warning cookie token cleanly
+function cookiesStringMatch(cookiesString: string): string | null {
+  const match = cookiesString.match(/download_warning_[^=]+=([^;,\s]+)/);
+  return match ? match[1] : null;
 }
