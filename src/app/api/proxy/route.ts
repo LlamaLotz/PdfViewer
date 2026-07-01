@@ -6,63 +6,6 @@ export const runtime = "edge";
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-interface RedirectResult {
-  response: Response;
-  cookies: string;
-}
-
-// Recursive redirect follower that sanitizes and accumulates cookies
-async function fetchWithRedirect(
-  initialUrl: string, 
-  headers: Record<string, string>, 
-  accumulatedCookies = "", 
-  depth = 0
-): Promise<RedirectResult> {
-  if (depth > 5) {
-    throw new Error("Too many redirects detected");
-  }
-
-  const requestHeaders = { ...headers };
-  if (accumulatedCookies) {
-    requestHeaders["Cookie"] = accumulatedCookies;
-  }
-
-  const res = await fetch(initialUrl, {
-    headers: requestHeaders,
-    redirect: "manual", // Manually intercept redirects
-  });
-
-  const setCookies = typeof res.headers.getSetCookie === "function" 
-    ? res.headers.getSetCookie() 
-    : [res.headers.get("set-cookie") || ""];
-    
-  // SANITIZER: Extract ONLY the key=value pairs, discarding attributes like Path, Secure, HttpOnly, etc.
-  const cleanNewCookies = setCookies
-    .map(cookie => cookie.split(";")[0].trim())
-    .filter(Boolean)
-    .join("; ");
-  
-  // Combine previously accumulated and new sanitized cookies cleanly
-  const updatedCookies = accumulatedCookies 
-    ? (cleanNewCookies ? `${accumulatedCookies}; ${cleanNewCookies}` : accumulatedCookies)
-    : cleanNewCookies;
-
-  // Intercept 301, 302, 303, 307, 308 redirect statuses
-  if (res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) {
-    const location = res.headers.get("location");
-    if (location) {
-      // Resolve relative redirect paths to absolute URLs if necessary
-      const absoluteUrl = location.startsWith("/") 
-        ? new URL(location, new URL(initialUrl).origin).toString()
-        : location;
-
-      return fetchWithRedirect(absoluteUrl, headers, updatedCookies, depth + 1);
-    }
-  }
-
-  return { response: res, cookies: updatedCookies };
-}
-
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const fileId = searchParams.get("id");
@@ -74,9 +17,11 @@ export async function GET(request: NextRequest) {
   const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
   try {
-    // 1. Initial request with a real browser User-Agent & manual recursive redirect handling
-    const { response: firstRes, cookies: firstCookies } = await fetchWithRedirect(checkUrl, {
-      "User-Agent": USER_AGENT,
+    // 1. Initial request (let fetch handle redirects natively to capture final cookie)
+    const firstRes = await fetch(checkUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+      },
     });
 
     const contentType = firstRes.headers.get("content-type") || "";
@@ -94,16 +39,23 @@ export async function GET(request: NextRequest) {
     }
 
     const htmlText = await firstRes.text();
+    const setCookieHeader = firstRes.headers.get("set-cookie") || "";
 
-    // Extract dynamic security parameters from Google's warning page
-    const uuidMatch = htmlText.match(/name="uuid" value="([^"]+)"/) || htmlText.match(/uuid=([a-zA-Z0-9\-_]+)/);
-    const uuidValue = uuidMatch ? uuidMatch[1] : "";
+    // Extract ONLY the critical download_warning cookie (e.g. "download_warning_123=ABCD")
+    const warningCookieMatch = setCookieHeader.match(/(download_warning_[^=]+=[^;,\s]+)/);
+    const warningCookie = warningCookieMatch ? warningCookieMatch[1] : "";
 
-    const atMatch = htmlText.match(/name="at" value="([^"]+)"/);
-    const atValue = atMatch ? atMatch[1] : "";
+    // Extract the confirm token (use cookie value first, then HTML, then fall back to 't')
+    const confirmToken = warningCookieMatch 
+      ? warningCookieMatch[1].split("=")[1] 
+      : (htmlText.match(/confirm=([0-9A-Za-z_-]+)/)?.[1] || "t");
 
-    // Target the direct download endpoint on Google content servers
-    let downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+    // Extract uuid and at tokens from the HTML
+    const uuidValue = htmlText.match(/name="uuid" value="([^"]+)"/)?.[1] || "";
+    const atValue = htmlText.match(/name="at" value="([^"]+)"/)?.[1] || "";
+
+    // Construct the direct download link
+    let downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=${confirmToken}`;
     if (uuidValue) {
       downloadUrl += `&uuid=${uuidValue}`;
     }
@@ -111,19 +63,22 @@ export async function GET(request: NextRequest) {
       downloadUrl += `&at=${atValue}`;
     }
 
-    // 2. Fetch the final binary download link with sanitized cookies, following CDN redirects manually
-    const { response: finalRes } = await fetchWithRedirect(downloadUrl, {
-      "User-Agent": USER_AGENT,
-    }, firstCookies);
+    // 2. Fetch the final binary download link with cookies, letting fetch handle redirects natively
+    const downloadRes = await fetch(downloadUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Cookie": warningCookie, // Only send the sanitized download_warning cookie
+      },
+    });
 
     // 3. Stream the raw binary content back with preserved headers
-    return new Response(finalRes.body, {
-      status: finalRes.status,
+    return new Response(downloadRes.body, {
+      status: downloadRes.status,
       headers: {
-        "Content-Type": finalRes.headers.get("content-type") || "application/pdf",
-        "Content-Length": finalRes.headers.get("content-length") || "",
+        "Content-Type": downloadRes.headers.get("content-type") || "application/pdf",
+        "Content-Length": downloadRes.headers.get("content-length") || "",
         "Access-Control-Allow-Origin": "*",
-        "Content-Disposition": finalRes.headers.get("content-disposition") || `inline; filename="document.pdf"`,
+        "Content-Disposition": downloadRes.headers.get("content-disposition") || `inline; filename="document.pdf"`,
       },
     });
   } catch (err: any) {
