@@ -17,12 +17,36 @@ export async function GET(request: NextRequest) {
   const checkUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
 
   try {
-    // 1. Initial request with a real browser User-Agent to avoid bot blocking
-    const res = await fetch(checkUrl, {
+    // 1. Initial request with a real browser User-Agent & manual redirect handling
+    let res = await fetch(checkUrl, {
       headers: {
         "User-Agent": USER_AGENT,
       },
+      redirect: "manual",
     });
+
+    // Safely collect all Set-Cookie headers in Edge Runtime
+    let cookiesArray = typeof res.headers.getSetCookie === "function" 
+      ? res.headers.getSetCookie() 
+      : [res.headers.get("set-cookie") || ""];
+
+    // Manually follow Google Drive redirects and accumulate cookies
+    if (res.status === 302 || res.status === 301 || res.status === 307) {
+      const location = res.headers.get("location");
+      if (location) {
+        res = await fetch(location, {
+          headers: {
+            "User-Agent": USER_AGENT,
+            "Cookie": cookiesArray.filter(Boolean).join("; "),
+          },
+          redirect: "manual",
+        });
+        const newCookies = typeof res.headers.getSetCookie === "function" 
+          ? res.headers.getSetCookie() 
+          : [res.headers.get("set-cookie") || ""];
+        cookiesArray = [...cookiesArray, ...newCookies];
+      }
+    }
 
     const contentType = res.headers.get("content-type") || "";
 
@@ -37,11 +61,11 @@ export async function GET(request: NextRequest) {
     }
 
     const htmlText = await res.text();
-    const cookies = res.headers.get("set-cookie") || "";
+    const cookiesString = cookiesArray.filter(Boolean).join("; ");
 
     // Multi-layer confirm token extraction:
-    // Option A: Extract from the download_warning cookie directly
-    const cookieMatch = cookies.match(/download_warning_[^=]+=([^;]+)/);
+    // Option A: Extract from the accumulated download_warning cookie directly
+    const cookieMatch = cookiesString.match(/download_warning_[^=]+=([^;]+)/);
     
     // Option B: Extract from the HTML text (form action or inputs)
     const confirmMatch = 
@@ -57,11 +81,10 @@ export async function GET(request: NextRequest) {
     const downloadRes = await fetch(downloadUrl, {
       headers: {
         "User-Agent": USER_AGENT,
-        Cookie: cookies,
+        "Cookie": cookiesString,
       },
     });
 
-    // 3. Stream the raw binary stream back to the browser progressively
     return new Response(downloadRes.body, {
       headers: {
         "Content-Type": "application/pdf",
